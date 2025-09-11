@@ -1,19 +1,21 @@
-import 'package:flutter/foundation.dart';
+import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:camera/camera.dart';
-import 'package:go_router/go_router.dart';
+import 'package:image/image.dart' as img;
+import '../services/color_model_service.dart';
 
 class CameraScreen extends StatefulWidget {
   const CameraScreen({Key? key}) : super(key: key);
 
   @override
-  State<CameraScreen> createState() => _CameraScreenState();
+  _CameraScreenState createState() => _CameraScreenState();
 }
 
 class _CameraScreenState extends State<CameraScreen> {
-  CameraController? _controller;
-  bool _isInitialized = false;
-  bool _cameraAvailable = true;
+  CameraController? _cameraController;
+  bool _isDetecting = false;
+  String _colorLabel = "";
+  final ColorModelService _colorService = ColorModelService();
 
   @override
   void initState() {
@@ -22,117 +24,90 @@ class _CameraScreenState extends State<CameraScreen> {
   }
 
   Future<void> _initializeCamera() async {
-    // Skip camera initialization on simulator or web
-    if (kIsWeb || defaultTargetPlatform == TargetPlatform.iOS && !await _hasRealCamera()) {
-      setState(() {
-        _cameraAvailable = false;
-      });
-      return;
-    }
+    final cameras = await availableCameras();
+    final backCamera =
+        cameras.firstWhere((camera) => camera.lensDirection == CameraLensDirection.back);
+
+    _cameraController = CameraController(
+      backCamera,
+      ResolutionPreset.medium,
+      enableAudio: false,
+      imageFormatGroup: ImageFormatGroup.yuv420,
+    );
+
+    await _cameraController!.initialize();
+
+    // Start real-time image stream
+    _cameraController!.startImageStream(_processCameraImage);
+
+    setState(() {});
+  }
+
+  void _processCameraImage(CameraImage image) async {
+    if (_isDetecting) return;
+    _isDetecting = true;
 
     try {
-      final cameras = await availableCameras();
-      if (cameras.isEmpty) {
-        setState(() {
-          _cameraAvailable = false;
-        });
-        return;
-      }
+      final convertedImage = _convertYUV420ToImage(image);
+      final label = _colorService.detectColorLabel(convertedImage);
 
-      _controller = CameraController(
-        cameras[0],
-        ResolutionPreset.medium,
-      );
-      await _controller!.initialize();
       setState(() {
-        _isInitialized = true;
+        _colorLabel = label;
       });
     } catch (e) {
-      print("Camera initialization failed: $e");
-      setState(() {
-        _cameraAvailable = false;
-      });
+      debugPrint("Error detecting color: $e");
+    } finally {
+      _isDetecting = false;
     }
   }
 
-  Future<bool> _hasRealCamera() async {
-    try {
-      final cameras = await availableCameras();
-      return cameras.isNotEmpty;
-    } catch (_) {
-      return false;
-    }
-  }
+  img.Image _convertYUV420ToImage(CameraImage image) {
+    // Convert YUV420 to RGB (image package) - simplified
+    final width = image.width;
+    final height = image.height;
+    final img.Image imgImage = img.Image(width, height);
 
-  Future<void> _takePicture() async {
-    if (_controller != null && _controller!.value.isInitialized) {
-      try {
-        XFile picture = await _controller!.takePicture();
-        print("Picture saved at: ${picture.path}");
-        context.go('/results');
-      } catch (e) {
-        print("Error taking picture: $e");
+    // Use the first plane (Y plane) for simplicity (approximates intensity)
+    final Uint8List bytes = image.planes[0].bytes;
+    for (int y = 0; y < height; y++) {
+      for (int x = 0; x < width; x++) {
+        final pixel = bytes[y * width + x];
+        imgImage.setPixel(x, y, img.getColor(pixel, pixel, pixel));
       }
-    } else {
-      // Just go to results in simulator
-      context.go('/results');
     }
+
+    return imgImage;
   }
 
   @override
   void dispose() {
-    _controller?.dispose();
+    _cameraController?.dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
-    if (!_cameraAvailable) {
-      return Scaffold(
-        appBar: AppBar(title: const Text("Camera")),
-        body: Center(
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              const Text(
-                "Camera not available on simulator.",
-                style: TextStyle(fontSize: 18),
-              ),
-              const SizedBox(height: 24),
-              ElevatedButton(
-                onPressed: () => context.go('/results'),
-                child: const Text("Go to Results"),
-              ),
-            ],
-          ),
-        ),
-      );
-    }
-
-    if (!_isInitialized) {
-      return const Scaffold(
-        body: Center(child: CircularProgressIndicator()),
-      );
+    if (_cameraController == null || !_cameraController!.value.isInitialized) {
+      return const Center(child: CircularProgressIndicator());
     }
 
     return Scaffold(
-      appBar: AppBar(title: const Text("Capture Strip")),
+      appBar: AppBar(title: const Text("Camera")),
       body: Stack(
         children: [
-          CameraPreview(_controller!),
+          CameraPreview(_cameraController!),
           Positioned(
-            bottom: 24,
+            bottom: 50,
             left: 0,
             right: 0,
             child: Center(
-              child: ElevatedButton(
-                onPressed: _takePicture,
-                style: ElevatedButton.styleFrom(
-                  shape: const CircleBorder(),
-                  padding: const EdgeInsets.all(20),
-                  backgroundColor: Colors.blueAccent,
+              child: Container(
+                padding: const EdgeInsets.all(12),
+                color: Colors.black54,
+                child: Text(
+                  "Detected: $_colorLabel",
+                  style: const TextStyle(color: Colors.white, fontSize: 20),
                 ),
-                child: const Icon(Icons.camera_alt, size: 32, color: Colors.white),
               ),
             ),
           ),
